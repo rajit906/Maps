@@ -1,90 +1,78 @@
-import collections
-import os
+import http.server
+import json
+import webbrowser
+import socket
 
 from abstractions import *
-import data.jsonl
+from utils import distance
 
-DATA_DIRECTORY = 'data'
-USER_DIRECTORY = 'users'
+def draw_map(centroids, restaurants, ratings):
+    """Write a JSON file containing inputs and load a visualization.
 
-def load_data(user_dataset, review_dataset, restaurant_dataset):
-    with open(os.path.join(DATA_DIRECTORY, user_dataset)) as f:
-        user_data = jsonl.load(f)
-    with open(os.path.join(DATA_DIRECTORY, review_dataset)) as f:
-        review_data = jsonl.load(f)
-    with open(os.path.join(DATA_DIRECTORY, restaurant_dataset)) as f:
-        restaurant_data = jsonl.load(f)
-
-    # Load users.
-    userid_to_user = {}
-    for user in user_data:
-        name = user['name']
-        _user_id = user['user_id']
-        user = make_user(name, []) # MISSING: reviews
-
-        userid_to_user[_user_id] = user
-
-    # Load restaurants.
-    busid_to_restaurant = {}
-    for restaurant in restaurant_data:
-        name = restaurant['name']
-        location = float(restaurant['latitude']), float(restaurant['longitude'])
-        categories = restaurant['categories']
-        price = restaurant['price']
-        if price is not None:
-            price = int(price)
-        num_reviews = int(restaurant['review_count'])
-
-        _business_id = restaurant['business_id']
-        restaurant = make_restaurant(name, location, categories, price, []) # MISSING: reviews
-        busid_to_restaurant[_business_id] = restaurant
-
-    # Load reviews.
-    reviews = []
-    busid_to_reviews = collections.defaultdict(list)
-    userid_to_reviews = collections.defaultdict(list)
-    for review in review_data:
-        _user_id = review['user_id']
-        _business_id = review['business_id']
-
-        restaurant = restaurant_name(busid_to_restaurant[_business_id])
-        rating = float(review['stars'])
-
-        review = make_review(restaurant, rating)
-        reviews.append(review)
-        busid_to_reviews[_business_id].append(review)
-        userid_to_reviews[_user_id].append(review)
-    # Reviews done.
-
-    restaurants = {}
-    for busid, restaurant in busid_to_restaurant.items():
+    Arguments:
+    centroids -- A sequence of positions
+    restaurants -- A sequence of restaurants
+    ratings -- A dictionary from restaurant names to ratings
+    """
+    data = []
+    locations = set()
+    for restaurant in restaurants:
+        p = tuple(restaurant_location(restaurant))
+        cluster = min(enumerate(centroids), key=lambda v: distance(p, v[1]))[0]
         name = restaurant_name(restaurant)
-        location = list(restaurant_location(restaurant))
-        categories = restaurant_categories(restaurant)
-        price = restaurant_price(restaurant)
-        restaurant_reviews = busid_to_reviews[busid]
+        rating = ratings[name]
+        if p not in locations:
+            data.append({
+                'x': p[0],
+                'y': p[1],
+                'weight': rating,
+                'name': name,
+                'cluster': cluster,
+            })
+            locations.add(p)
+    with open('visualize/voronoi.json', 'w') as f:
+        json.dump(data, f)
+    load_visualization('voronoi.html')
 
-        restaurant = make_restaurant(name, location, categories, price, restaurant_reviews)
-        restaurants[name] = restaurant
-    # Restaurants done.
+port = 8000
+base_url = 'http://localhost:{0}/visualize/'.format(port)
 
-    users = []
-    for userid, user in userid_to_user.items():
-        name = user_name(user)
-        user_reviews = userid_to_reviews[userid]
+def load_visualization(url):
+    """Load the visualization located at URL."""
+    if not check_port():
+        print('Address already in use! Check if recommend.py is running in a separate terminal.')
+        return
+    server = start_threaded_server()
+    webbrowser.open_new(base_url + url)
+    try:
+        server.join()
+    except KeyboardInterrupt:
+        print('\nKeyboard interrupt received, exiting.')
 
-        user = make_user(name, user_reviews)
-        users.append(user)
-    # Users done.
+class SilentServer(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, format, *args):
+        return
 
-    return users, reviews, list(restaurants.values())
+def check_port():
+    sock = socket.socket()
+    success = sock.connect_ex(('localhost', port))
+    sock.close()
+    return success
 
-USERS, REVIEWS, ALL_RESTAURANTS = load_data('users.json', 'reviews.json', 'restaurants.json')
-CATEGORIES = {c for r in ALL_RESTAURANTS for c in restaurant_categories(r)}
+def start_server():
+    server, handler = http.server.HTTPServer, SilentServer
+    httpd = server(('', port), handler)
+    sa = httpd.socket.getsockname()
+    print('Serving HTTP on', sa[0], 'port', sa[1], '...')
+    print('Type Ctrl-C to exit.')
+    try:
+        httpd.serve_forever()
+    finally:
+        httpd.server_close()
 
-def load_user_file(user_file):
-    with open(os.path.join(USER_DIRECTORY, user_file)) as f:
-        return eval(f.read())
-
-import glob
-USER_FILES = [f[6:-4] for f in glob.glob('users/*.dat')]
+import threading
+def start_threaded_server():
+    thread = threading.Thread(target=start_server)
+    thread.daemon = True
+    thread.start()
+    return thread
